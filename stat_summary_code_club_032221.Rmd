@@ -1,0 +1,233 @@
+---
+title: "Code Review - stat_summary"
+author: "Nick Lesniak"
+date: "`r Sys.Date()`"
+output: 
+  github_document: default
+  html_document: default
+---
+
+
+Using data from COVID Racial Data Tracker https://covidtracking.com/  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse, quietly = T)
+
+covid_data <- read_csv('https://docs.google.com/spreadsheets/d/e/2PACX-1vS8SzaERcKJOD_EzrtCDK1dX1zkoMochlA9iHoHg_RSw3V8bkpfk1mpw4pfL5RdtSOyx_oScsUtyXyk/pub?gid=43720681&single=true&output=csv',
+         col_types = cols(.default = col_double(), State = col_character())) %>% 
+  pivot_longer(cols = -c(State, Date), names_to = 'data_type', values_to = 'value') %>% 
+  filter(!grepl('Ethni', data_type)) %>% 
+  mutate(data_type = gsub('Ethnicity_', '', data_type),
+         Date = lubridate::as_date(
+            gsub('(\\d{4})(\\d{2})(\\d{2})', '\\1-\\2-\\3', Date))) %>% 
+  separate(data_type, c('type', 'race_ethnicity'))
+
+covid_totals <- covid_data %>% 
+  filter(race_ethnicity == 'Total') %>% 
+  rename(total = value) %>% 
+  select(-race_ethnicity)
+
+covid_data <- covid_data %>% 
+  filter(race_ethnicity != 'Total',
+         type %in% c('Cases', 'Deaths')) %>% 
+  left_join(covid_totals, by = c('Date', 'State', 'type')) %>% 
+  mutate(per100people = round(value/total * 100, 0))
+
+mi_cases <- covid_data %>% 
+  filter(State == 'MI', 
+         type == 'Cases',
+         !is.na(per100people))
+  
+```
+
+### Michigan COVID cases by race from April 12, 2020 through March 7, 2021
+
+```{r points}
+mi_cases %>% 
+  ggplot(aes(x = race_ethnicity, y = per100people)) + 
+    geom_point(alpha = 0.1, position = position_jitter(0.3)) + 
+    theme_bw() + labs(x = NULL, y = 'Cases per 100 people')
+
+```
+
+This causes a lot of overplotting, let's calculate the summary statistics and plot the median and interquartile range.
+
+
+```{r calc_median_iqr}
+mi_cases %>% 
+  group_by(type, race_ethnicity) %>% 
+  mutate(median = median(per100people),
+         lower = quantile(per100people, probs = c(0.25), na.rm = T),
+         upper = quantile(per100people, probs = c(0.75), na.rm = T)) %>% 
+  ggplot(aes(x = race_ethnicity)) + 
+    geom_point(aes(y = median)) + 
+    geom_errorbar(aes(ymin = lower, ymax = upper)) + 
+    theme_bw() + labs(x = NULL, y = 'Cases per 100 people')
+
+```
+
+Creating the plot with mutate works, but...
+what if we want to change anything in the plot?  
+  
+  
+What would need to be changed?    
+  
+  
+
+What if we could set the plotted stats in the plot itself?
+
+### stat_summary
+
+You may have actually already been using stat_summary - for example, `geom_bar(fun = "mean", stat = "summary")` is using `stat_summary`.  
+`stat_summary` allows us to visualize any summary statistic with most geoms. It is similar to grouping and summarizing within the ggplot layer
+
+```{r}
+mi_cases %>% 
+  group_by(race_ethnicity) %>% 
+  summarize(y = median(per100people))
+```
+
+
+Let's use the `stat_summary` function to tidy up our plotting code
+
+```{r point plot}
+mi_cases %>% 
+  ggplot(aes(x = race_ethnicity, y = per100people)) + 
+    stat_summary(fun = median, 
+                 geom = 'point') + 
+    theme_bw() + labs(x = NULL, y = 'Cases per 100 people')
+
+```
+
+Here we specify the function to be applied to y, `fun = median`, and how we want it visualized, `geom = 'point'`. With this information, the median will be plotted based on the plotting groups, no need to recalcuate if changing groupings. But what if we wanted to add in error bars?
+
+
+We can specify the min and max for geoms that can plot that information. We can use R functions.
+
+
+```{r range plot}
+mi_cases %>% 
+  ggplot(aes(x = race_ethnicity, y = per100people)) + 
+    stat_summary(fun = median,
+                 fun.min = min,
+                 fun.max = max,
+                 geom = 'pointrange') + 
+    theme_bw() + labs(x = NULL, y = 'Cases per 100 people')
+
+```
+
+Or we can input our own functions.
+
+
+```{r plot}
+mi_cases %>% 
+  ggplot(aes(x = race_ethnicity, y = per100people)) + 
+    stat_summary(fun = median,
+                 fun.min = function(x)quantile(x, probs = 0.25, na.rm = T),
+                 fun.max = function(x)quantile(x, probs = 0.75, na.rm = T),
+                 geom = 'pointrange') + 
+    theme_bw() + labs(x = NULL, y = 'Cases per 100 people')
+
+```
+
+
+But for something like mean and confidence intervals, no need to create this ourselves, theres a function for that.
+We can use functions from the `Hmisc` package to process our data using `fun.data`, this takes the data and calculates the `y`, `ymin` and `ymax`, then outputs a dataframe from ggplot to plot.
+
+
+```{r}
+median_hilow
+```
+
+
+To see how these functions work, we need to look at the Hmisc functions that hmisc/ggplot are referencing  
+`?Hmisc::smedian.hilow`
+
+```{r}
+Hmisc::smedian.hilow
+```
+
+
+```{r}
+mi_cases %>% 
+  group_by(race_ethnicity) %>% 
+  summarise(median_hilow(per100people))
+```
+
+Others functions are  
+`mean_cl_boot()`  
+`mean_cl_normal()`  
+`mean_sdl()`  
+`median_hilow()` 
+
+
+```{r}
+mi_cases %>% 
+  ggplot(aes(x = race_ethnicity, y = per100people)) + 
+    	stat_summary(fun.data = median_hilow, 
+    	             fun.args = list(conf.int=0.5)) +
+      theme_bw() + labs(x = NULL, y = 'Cases per 100 people')
+
+```
+
+In this example we specified `fun.args = list(conf.int=0.5)` to give us the interquartile range. 
+
+
+Using this function we can change the data we are plotting without the need to recalculate and make another new dataframe.
+Let's plot the cases of COVID over time by race for all states.
+
+### Cases of COVID over time by race for all states.
+
+```{r}
+covid_data %>% 
+  filter(type == 'Cases') %>% 
+  ggplot(aes(x = Date, y = per100people, color = race_ethnicity)) + 
+    stat_summary(fun.data = median_hilow, 
+  	             fun.args = list(conf.int=0.5)) + 
+    theme_bw() + labs(x = NULL, y = 'Cases per 100 people', color = NULL)
+
+```
+
+We can customize our plot by layering different `stat_summary` layers.
+
+
+```{r}
+covid_data %>% 
+  filter(type == 'Cases',
+         !is.na(per100people)) %>% 
+  ggplot(aes(x = Date, y = per100people, color = race_ethnicity, fill = race_ethnicity)) + 
+    stat_summary(fun = median, geom = 'line') + 		
+    stat_summary(fun.data = median_hilow, fun.args = list(conf.int = 0.5), 
+                 geom = 'ribbon', alpha = 0.1, size = 0.1) + 
+    theme_bw() + labs(x = NULL, y = 'Cases per 100 people', color = NULL)
+
+```
+
+### Your turn, what do you see in the COVID data for your home state/or other region of interest?
+
+```{r, eval = FALSE}
+covid_data %>% 
+
+```
+
+#### OptiFit project
+
+Kelly & Nick's breakout room
+
+```{r}
+library(glue)
+optifit <- read_tsv('optifit_results.tsv')
+optifit %>% 
+  mutate(strategy = case_when(
+    strategy == "database" ~ as.character(glue("database_{ref}")),
+    TRUE ~ strategy)) %>% 
+  mutate(strategy = fct_reorder(as.factor(strategy), mcc)) %>% 
+  ggplot(aes(x = strategy, y = mcc, color = dataset)) + 
+    stat_summary(fun.data = median_hilow, 
+  	             fun.args = list(conf.int=0.5)) +
+  facet_wrap('dataset') +
+  coord_flip() +
+  theme_bw()
+```
+
